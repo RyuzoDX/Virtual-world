@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>3D dengan Langit Shader Dinamis (Dimodifikasi)</title>
+<style>
+  body { margin: 0; overflow: hidden; background-color: #000; }
+  canvas { display: block; touch-action: none; }
+</style>
+</head>
+<body>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.152.2/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.152.2/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+// Kelas FreeFlyControls tidak berubah (tetap sama seperti aslinya )
+class FreeFlyControls {
+  constructor(camera, domElement ) {
+    this.camera = camera;
+    this.domElement = domElement;
+    this.pitch = 0;
+    this.yaw = 0;
+    this.position = camera.position.clone();
+    this._state = 'none';
+    this._lastSingleTouch = null;
+    this._lastTwoTouchDist = 0;
+    this._lastTwoTouchCenter = null;
+    this._bindEvents();
+    this.updateCamera();
+  }
+  _bindEvents() {
+    this.domElement.style.touchAction = 'none';
+    this.domElement.addEventListener('touchstart', e => this._onTouchStart(e), { passive: false });
+    this.domElement.addEventListener('touchmove', e => this._onTouchMove(e), { passive: false });
+    this.domElement.addEventListener('touchend', e => this._onTouchEnd(e), false);
+  }
+  _onTouchStart(event) {
+    event.preventDefault();
+    const touches = event.touches;
+    if (touches.length === 1) {
+      this._state = 'rotate';
+      this._lastSingleTouch = { x: touches[0].clientX, y: touches[0].clientY };
+    } else if (touches.length === 2) {
+      this._state = 'pan-zoom';
+      this._lastTwoTouchDist = this._distance(touches);
+      this._lastTwoTouchCenter = this._center(touches);
+    } else {
+      this._state = 'none';
+    }
+  }
+  _onTouchMove(event) {
+    event.preventDefault();
+    const touches = event.touches;
+    if (this._state === 'rotate' && touches.length === 1) {
+      const dx = touches[0].clientX - this._lastSingleTouch.x;
+      const dy = touches[0].clientY - this._lastSingleTouch.y;
+      this.yaw -= dx * 0.005;
+      this.pitch -= dy * 0.005;
+      const maxPitch = Math.PI/2 * 0.99;
+      this.pitch = Math.min(maxPitch, Math.max(-maxPitch, this.pitch));
+      this._lastSingleTouch = { x: touches[0].clientX, y: touches[0].clientY };
+      this.updateCamera();
+    } else if (this._state === 'pan-zoom' && touches.length === 2) {
+      const newDist = this._distance(touches);
+      const newCenter = this._center(touches);
+      const zoomDelta = newDist - this._lastTwoTouchDist;
+      this._moveForward(zoomDelta * 0.01);
+      this._lastTwoTouchDist = newDist;
+      const dx = newCenter.x - this._lastTwoTouchCenter.x;
+      const dy = newCenter.y - this._lastTwoTouchCenter.y;
+      this._pan(dx * -0.01, dy * 0.01);
+      this._lastTwoTouchCenter = newCenter;
+      this.updateCamera();
+    }
+  }
+  _onTouchEnd(event) {
+    event.preventDefault();
+    const touches = event.touches;
+    if (touches.length === 0) {
+      this._state = 'none';
+    } else if (touches.length === 1) {
+      this._state = 'rotate';
+      this._lastSingleTouch = { x: touches[0].clientX, y: touches[0].clientY };
+    }
+  }
+  _distance(touches) {
+    const dx = touches[0].clientX - touches[1].clientX;
+    const dy = touches[0].clientY - touches[1].clientY;
+    return Math.sqrt(dx*dx + dy*dy);
+  }
+  _center(touches) {
+    return { x: (touches[0].clientX + touches[1].clientX)/2, y: (touches[0].clientY + touches[1].clientY)/2 };
+  }
+  _moveForward(distance) {
+    const dir = new THREE.Vector3();
+    this.camera.getWorldDirection(dir);
+    dir.multiplyScalar(distance);
+    this.position.add(dir);
+  }
+  _pan(dx, dy) {
+    const right = new THREE.Vector3();
+    this.camera.getWorldDirection(right);
+    right.cross(this.camera.up).normalize();
+    const up = new THREE.Vector3(0,1,0);
+    right.multiplyScalar(dx);
+    up.multiplyScalar(dy);
+    this.position.add(right);
+    this.position.add(up);
+  }
+  updateCamera() {
+    this.camera.position.copy(this.position);
+    const q = new THREE.Quaternion();
+    q.setFromEuler(new THREE.Euler(this.pitch, this.yaw, 0, 'YXZ'));
+    this.camera.quaternion.copy(q);
+  }
+}
+
+function main() {
+  const renderer = new THREE.WebGLRenderer({antialias:true});
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.shadowMap.enabled = true;
+  renderer.toneMapping = THREE.ReinhardToneMapping;
+  document.body.appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 1000);
+  camera.position.set(0, 7, 15);
+
+  scene.fog = new THREE.Fog(0x87ceeb, 10, 200);
+
+  const skyGeo = new THREE.SphereGeometry(500, 32, 15);
+  
+  const skyShaderUniforms = {
+    topColor: { value: new THREE.Color(0x0077ff) },
+    // MODIFIKASI: Mengubah warna cakrawala dari putih menjadi biru muda untuk mengurangi silau.
+    horizonColor: { value: new THREE.Color(0xADD8E6) }, 
+    sunPosition: { value: new THREE.Vector3() },
+    sunsetColor: { value: new THREE.Color(0xff6600) },
+    nightColor: { value: new THREE.Color(0x050515) },
+    dayFactor: { value: 0.0 }
+  };
+
+  const skyMat = new THREE.ShaderMaterial({
+    uniforms: skyShaderUniforms,
+    vertexShader: `
+      varying vec3 vWorldPosition;
+      void main() {
+        vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+        vWorldPosition = worldPosition.xyz;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 topColor;
+      uniform vec3 horizonColor;
+      uniform vec3 sunsetColor;
+      uniform vec3 nightColor;
+      uniform vec3 sunPosition;
+      uniform float dayFactor;
+
+      varying vec3 vWorldPosition;
+
+      void main() {
+        vec3 viewDirection = normalize(vWorldPosition - cameraPosition);
+        float heightFactor = max(0.0, viewDirection.y);
+        vec3 dayGradient = mix(horizonColor, topColor, heightFactor);
+        float sunsetFactor = pow(1.0 - max(0.0, viewDirection.y), 4.0) * (1.0 - dayFactor);
+        vec3 dayAndSunset = mix(dayGradient, sunsetColor, sunsetFactor * 0.5);
+        gl_FragColor = vec4(mix(nightColor, dayAndSunset, dayFactor), 1.0);
+      }
+    `,
+    side: THREE.BackSide
+  });
+  const skydome = new THREE.Mesh(skyGeo, skyMat);
+  scene.add(skydome);
+
+  // Awan, tanah, bola, dll tidak berubah
+  const clouds = [];
+  const textureLoader = new THREE.TextureLoader();
+  const cloudTexture = textureLoader.load('https://raw.githubusercontent.com/mrdoob/three.js/master/examples/textures/cloud.png'  );
+  const cloudGeo = new THREE.PlaneGeometry(60, 30);
+  const cloudMat = new THREE.MeshBasicMaterial({ map: cloudTexture, transparent: true, opacity: 0.7, depthWrite: false });
+  for (let i = 0; i < 15; i++) {
+    const cloud = new THREE.Mesh(cloudGeo, cloudMat);
+    cloud.position.set((Math.random() - 0.5) * 300, Math.random() * 20 + 25, (Math.random() - 0.5) * 300);
+    cloud.rotation.y = Math.random() * Math.PI * 2;
+    scene.add(cloud);
+    clouds.push(cloud);
+  }
+  const groundGeo = new THREE.PlaneGeometry(50, 50);
+  const groundMat = new THREE.MeshStandardMaterial({color:0x228B22, roughness:1});
+  const ground = new THREE.Mesh(groundGeo, groundMat);
+  ground.rotation.x = -Math.PI/2;
+  ground.receiveShadow = true;
+  scene.add(ground);
+  const ballGeo = new THREE.SphereGeometry(1.5, 32, 32);
+  const ballMat = new THREE.MeshStandardMaterial({ color:0xff8833, roughness:0.2, metalness:0.8, emissive: 0xff4500, emissiveIntensity: 1.5 });
+  const ball = new THREE.Mesh(ballGeo, ballMat);
+  ball.position.set(0,1.5,0);
+  ball.castShadow = true;
+  scene.add(ball);
+
+  const sunLight = new THREE.DirectionalLight(0xffffff, 1.5);
+  sunLight.castShadow = true;
+  sunLight.shadow.mapSize.width = 2048;
+  sunLight.shadow.mapSize.height = 2048;
+  sunLight.shadow.camera.left = -30;
+  sunLight.shadow.camera.right = 30;
+  sunLight.shadow.camera.top = 30;
+  sunLight.shadow.camera.bottom = -30;
+  sunLight.shadow.camera.near = 1;
+  sunLight.shadow.camera.far = 100;
+  scene.add(sunLight);
+  scene.add(sunLight.target);
+
+  const ambientLight = new THREE.AmbientLight(0x404040, 0.6);
+  scene.add(ambientLight);
+
+  const sunGeo = new THREE.SphereGeometry(5, 32, 32);
+  const sunMat = new THREE.MeshBasicMaterial({ color: 0xffff00, emissive: 0xffff00 });
+  const sun = new THREE.Mesh(sunGeo, sunMat);
+  scene.add(sun);
+
+  const controls = new FreeFlyControls(camera, renderer.domElement);
+
+  const renderScene = new RenderPass(scene, camera);
+  const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
+  bloomPass.threshold = 0;
+  bloomPass.strength = 0.5;
+  bloomPass.radius = 0.5;
+
+  const composer = new EffectComposer(renderer);
+  composer.addPass(renderScene);
+  composer.addPass(bloomPass);
+
+  const orbitRadius = 50;
+  const dayAmbient = new THREE.Color(0x6688cc);
+  const nightAmbient = new THREE.Color(0x111122);
+  let time = 0;
+
+  // MODIFIKASI: Menghitung kecepatan baru untuk siklus 10 menit.
+  // 1 siklus = 10 menit = 600 detik.
+  // Asumsi 60 frame per detik. Total frame = 600 * 60 = 36000.
+  // Variabel 'time' berjalan dari 0 ke 1 untuk satu siklus.
+  // Jadi, peningkatannya per frame adalah 1 / 36000.
+  const timeIncrement = 1 / 36000;
+
+  function animate() {
+    requestAnimationFrame(animate);
+
+    time += timeIncrement; // Menggunakan kecepatan yang sudah dihitung
+    if (time > 1) time -= 1; // Loop kembali ke 0 setelah 1 siklus penuh
+
+    const angle = time * Math.PI * 2;
+
+    const sunX = Math.cos(angle) * orbitRadius;
+    const sunY = Math.sin(angle) * orbitRadius;
+    
+    sun.position.set(sunX, sunY, 0);
+    sunLight.position.copy(sun.position);
+    sunLight.target.position.set(0, 0, 0);
+
+    const sunAltitude = sun.position.y / orbitRadius;
+    const dayFactor = Math.max(0, sunAltitude);
+    const nightFactor = 1 - dayFactor;
+
+    skyShaderUniforms.sunPosition.value.copy(sun.position);
+    skyShaderUniforms.dayFactor.value = dayFactor;
+
+    ambientLight.color.lerpColors(nightAmbient, dayAmbient, dayFactor);
+    sunLight.intensity = dayFactor * 1.5;
+    sun.visible = sunAltitude > -0.1;
+
+    const horizonColor = new THREE.Color().lerpColors(skyShaderUniforms.nightColor.value, skyShaderUniforms.horizonColor.value, dayFactor);
+    const sunsetHorizon = new THREE.Color().lerpColors(horizonColor, skyShaderUniforms.sunsetColor.value, (1.0 - dayFactor) * 0.5);
+    scene.fog.color.copy(sunsetHorizon);
+    scene.fog.near = 50 + nightFactor * 40;
+    scene.fog.far = 300 + nightFactor * 100;
+
+    ball.rotation.y += 0.01;
+    clouds.forEach(cloud => {
+      cloud.position.x += 0.05;
+      if (cloud.position.x > 150) {
+        cloud.position.x = -150;
+      }
+    });
+
+    controls.updateCamera();
+    composer.render();
+  }
+  animate();
+
+  window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth/window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    composer.setSize(window.innerWidth, window.innerHeight);
+  });
+}
+
+main();
+</script>
+</body>
+</html>
